@@ -1,0 +1,85 @@
+import csv
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+REF_ROOT = Path("outputs/automated_evaluation")
+PRED_ROOT = Path("outputs/holdout_grabcut/masks")
+OUT = Path("outputs/automated_evaluation/holdout_metrics.csv")
+
+
+def mask_index(root):
+    return {
+        p.stem.replace("_selected", ""): p
+        for p in root.rglob("*.png")
+    }
+
+
+references = mask_index(REF_ROOT)
+predictions = mask_index(PRED_ROOT)
+rows = []
+
+for key, pred_path in sorted(predictions.items()):
+    ref_path = references.get(key)
+
+    if ref_path is None:
+        rows.append({
+            "image": key,
+            "iou": "",
+            "dice": "",
+            "status": "reference mask missing",
+        })
+        continue
+
+    ref = cv2.imread(str(ref_path), cv2.IMREAD_GRAYSCALE)
+    pred = cv2.imread(str(pred_path), cv2.IMREAD_GRAYSCALE)
+
+    if ref is None or pred is None:
+        continue
+
+    if ref.shape != pred.shape:
+        pred = cv2.resize(
+            pred,
+            (ref.shape[1], ref.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+    ref = ref > 0
+    pred = pred > 0
+
+    intersection = np.logical_and(ref, pred).sum()
+    union = np.logical_or(ref, pred).sum()
+    denominator = ref.sum() + pred.sum()
+
+    iou = float(intersection / union) if union else 1.0
+    dice = float(2 * intersection / denominator) if denominator else 1.0
+
+    rows.append({
+        "image": key,
+        "iou": round(iou, 4),
+        "dice": round(dice, 4),
+        "status": "compared with selected SAM pseudo-reference",
+    })
+
+OUT.parent.mkdir(parents=True, exist_ok=True)
+
+with OUT.open("w", newline="") as f:
+    writer = csv.DictWriter(
+        f, fieldnames=["image", "iou", "dice", "status"]
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+
+valid = [r for r in rows if isinstance(r["iou"], float)]
+
+print("Predictions:", len(predictions))
+print("Compared:", len(valid))
+print("Missing references:", len(rows) - len(valid))
+
+if valid:
+    print("Mean IoU:", round(np.mean([r["iou"] for r in valid]), 4))
+    print("Mean Dice:", round(np.mean([r["dice"] for r in valid]), 4))
+
+print("Saved:", OUT)
+print("Note: metrics measure agreement with selected SAM masks, not ground truth.")
